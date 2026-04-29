@@ -1,22 +1,42 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0
 
-# NOTE: for this script to work, you should have the `cargo-watch` crate installed
-# cargo install cargo-watch
+## Hot-reload script for Rust LKM Template
+## Watches for changes and automatically rebuilds and runs
 
-usage() {
-	echo "Usage: $0 [-b /path/to/busybox] [-k /path/to/kernel]"
+set -euo pipefail
+IFS=$'\n\t'
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly KERNEL="${KERNEL:-../linux}"
+readonly BUSYBOX="${BUSYBOX:-../busybox}"
+
+check_deps() {
+    if ! command -v cargo-watch &>/dev/null; then
+        printf "Error: cargo-watch is required. Install with: cargo install cargo-watch\\n" >&2
+        exit 1
+    fi
 }
 
-requires() {
-	for i in "$@"; do
-		if ! command -v "$i" &>/dev/null; then
-			echo "Error: $i is required but not installed."
-			exit 1
-		fi
-	done
+main() {
+    check_deps
+
+    printf "Watching for changes in *.rs, Makefile, Kbuild, and scripts/...\\n"
+
+    local watch_sources=(
+        "-w" "Makefile"
+        "-w" "Kbuild"
+        "-w" "./scripts"
+    )
+
+    # Add all .rs files to watch list
+    while IFS= read -r -d '' file; do
+        watch_sources+=("-w" "$file")
+    done < <(find . -name "*.rs" -print0)
+
+    cargo watch --poll -q -c -N \
+        -s "./scripts/build && ./scripts/run && ./scripts/build -t clean" \
+        "${watch_sources[@]}"
 }
 
-requires cargo-watch
-
-# Should run again if any *.rs file changes, Makefile changes, Kbuild changes or any file inside ./scripts changes
-cargo watch --poll -q -c -N -s "./scripts/build && ./scripts/run && ./scripts/build -t clean" -w Makefile -w Kbuild -w ./scripts $(find . -name '*.rs' -exec echo '-w' {} \;)
+main "$@"

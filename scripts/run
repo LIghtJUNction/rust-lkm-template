@@ -1,63 +1,81 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0
+
+## Run script for Rust LKM Template
+## Spins up QEMU with the compiled kernel module
+
+set -euo pipefail
+IFS=$'\n\t'
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly KERNEL="${KERNEL:-../linux}"
+readonly BUSYBOX="${BUSYBOX:-../busybox}"
 
 usage() {
-	echo "Usage: $0 [-b /path/to/busybox] [-k /path/to/kernel]"
+    cat <<EOF
+Usage: ${0##*/} [-k <kernel-dir>] [-b <busybox-dir>]
+
+Options:
+    -k KERNEL    Path to rust-enabled kernel (default: ../linux)
+    -b BUSYBOX   Path to built busybox (default: ../busybox)
+EOF
+    exit 1
 }
 
-requires() {
-	for i in "$@"; do
-		if ! command -v "$i" &>/dev/null; then
-			echo "Error: $i is required but not installed."
-			exit 1
-		fi
-	done
+check_deps() {
+    local deps=(qemu-system-x86_64 cpio gzip)
+    for cmd in "${deps[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            printf "Error: '%s' is required but not installed.\\n" "$cmd" >&2
+            exit 1
+        fi
+    done
 }
 
-# Dependencies
-requires qemu-system-x86_64 cpio gzip
+main() {
+    local kernel="$KERNEL"
+    local busybox="$BUSYBOX"
 
-BUSYBOX=../busybox
-KERNEL=../linux
+    while getopts ":k:b:h" opt; do
+        case "$opt" in
+            k) kernel="$OPTARG" ;;
+            b) busybox="$OPTARG" ;;
+            h) usage ;;
+            :) printf "Option -%s requires an argument\\n" "$OPTARG" >&2; exit 1 ;;
+            *) printf "Invalid option: -%s\\n" "$OPTARG" >&2; exit 1 ;;
+        esac
+    done
 
-# ./scripts/run -b /path/to/busybox -k /path/to/kernel
-while getopts "b:k:" opt; do
-	case $opt in
-	b)
-		BUSYBOX=$OPTARG
-		;;
-	k)
-		KERNEL=$OPTARG
-		;;
-	\?)
-		echo "Invalid option: -$OPTARG" >&2
-		exit 1
-		;;
-	:)
-		echo "Option -$OPTARG requires an argument." >&2
-		exit 1
-		;;
-	esac
-done
+    check_deps
 
-# First, whe should build copy all of the .ko files to the busybox/_install directory so that they can be loaded
-# by the kernel.
-find . -name "*.ko" -exec cp {} "$BUSYBOX"/_install/ \;
+    local install_dir="${busybox}/_install"
+    if [[ ! -d "$install_dir" ]]; then
+        printf "Error: BusyBox install directory not found: %s\\n" "$install_dir" >&2
+        exit 1
+    fi
 
-# now, we generate the initramfs
-pushd "$BUSYBOX"/_install > /dev/null || exit
-find . | cpio -o -H newc | gzip -9 >../initramfs.img
+    printf "Copying .ko files to initramfs...\\n"
+    while IFS= read -r ko; do
+        cp "$ko" "$install_dir/"
+    done < <(find . -name "*.ko" 2>/dev/null || true)
 
-popd > /dev/null || exit
+    printf "Generating initramfs...\\n"
+    pushd "$install_dir" > /dev/null || exit 1
+    find . -print0 | cpio -o -H newc --null | gzip -9 > "../initramfs.img"
+    popd > /dev/null || exit 1
 
-# now, we run the kernel in qemu
-qemu-system-x86_64 \
-	-kernel "$KERNEL"/vmlinux \
-	-append "console=ttyS0,115200 root=/dev/ram0 loglevel=3" \
-	-initrd "$BUSYBOX"/initramfs.img \
-	-nographic \
-	-machine q35 \
-	-enable-kvm \
-	-device intel-iommu \
-	-cpu host \
-	-m 1G \
-	-nic user,model=rtl8139,hostfwd=tcp::5555-:23,hostfwd=tcp::5556-:8080
+    printf "Starting QEMU...\\n"
+    exec qemu-system-x86_64 \
+        -kernel "${kernel}/vmlinux" \
+        -append "console=ttyS0,115200 root=/dev/ram0 loglevel=3" \
+        -initrd "${busybox}/initramfs.img" \
+        -nographic \
+        -machine q35 \
+        -enable-kvm \
+        -device intel-iommu \
+        -cpu host \
+        -m 1G \
+        -nic user,model=rtl8139,hostfwd=tcp::5555-:23,hostfwd=tcp::5556-:8080
+}
+
+main "$@"

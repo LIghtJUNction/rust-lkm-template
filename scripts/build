@@ -1,19 +1,51 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0
+
+## Build script for Rust LKM Template
+## Modernized for 2026 with improved error handling and POSIX compliance
+
+set -euo pipefail
+IFS=$'\n\t'
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly KDIR="${KDIR:-../linux}"
 
 usage() {
-	echo "Usage: $0 [-k <kernel source directory>] [-t <target>]" 1>&2
-	exit 1
+    cat <<EOF
+Usage: ${0##*/} [-k <kernel-directory>] [-t <target>]
+
+Options:
+    -k KDIR    Kernel source directory (default: ../linux)
+    -t TARGET  Make target (e.g., clean, rust-analyzer)
+
+Environment:
+    KDIR       Kernel source directory
+EOF
+    exit 1
 }
 
-KDIR=../linux
-TARGET=
+main() {
+    local target=""
 
-while getopts k:t: option; do
-	case "$option" in
-	k) KDIR=${OPTARG} ;;
-	t) TARGET=${OPTARG} ;;
-	*) usage ;;
-	esac
-done
+    while getopts ":k:t:h" opt; do
+        case "$opt" in
+            k) readonly KDIR="$OPTARG" ;;
+            t) target="$OPTARG" ;;
+            h) usage ;;
+            :) printf "Option -%s requires an argument\\n" "$OPTARG" >&2; exit 1 ;;
+            *) printf "Invalid option: -%s\\n" "$OPTARG" >&2; exit 1 ;;
+        esac
+    done
+    shift "$((OPTIND - 1))"
 
-make LLVM=1 CLIPPY=1 -C "$KDIR" M="$PWD" "$TARGET" -j"$(nproc)"
+    if [[ ! -d "$KDIR" ]]; then
+        printf "Error: Kernel directory '%s' not found\\n" "$KDIR" >&2
+        exit 1
+    fi
+
+    printf "Building LKM with kernel at: %s\\n" "$KDIR"
+
+    make LLVM=1 CLIPPY=1 -C "$KDIR" M="${PWD}" $target -j"$(nproc)"
+}
+
+main "$@"

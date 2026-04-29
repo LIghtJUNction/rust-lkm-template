@@ -1,8 +1,17 @@
 [package]
 name = "rust-lkm-template"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
+authors = ["Pablo Alessando Santos Hugen <pablo@example.com>"]
+description = "A modern Rust Linux Kernel Module template"
+license = "GPL-2.0-only"
+repository = "https://github.com/yourname/rust-lkm-template"
+keywords = ["linux", "kernel", "lkm", "rust", "kernel-module"]
+categories = ["kernel-programs", "no-std::no-core"]
+rust-version = "1.90.0"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[package.metadata]
+rustfmt = { version = "2", style = "Blazingly" }
+clippy.workspace = true
 
 [dependencies]
