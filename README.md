@@ -1,84 +1,111 @@
-# Rust Loadable Kernel Module Template
+# Rust Linux Kernel Module Template
 
-## Setup
+A modern template for developing Linux Kernel Modules (LKM) in Rust, built on the [Rust-for-Linux](https://github.com/Rust-for-Linux) project.
 
-Note that you need to have a
-[_rust enabled_](https://tomcat0x42.me/linux/rust/2023/04/01/linux-kernel-rust-dev-environment.html)
-kernel to use this template. Follow the instructions on the link or see one of
-the references.
+## Prerequisites
 
-The default paths for scripts in this template are:
+- Arch Linux (or similar)
+- ~50GB disk space for kernel build
+- Patience
 
-- `KERNEL`: `../linux`
-- `BUSYBOX`: `../busybox`
+## Quick Start
 
-So, you should have a `KERNEL` dir with a rust enabled kernel already built and
-a `BUSYBOX` dir with a **ALREADY** built and configured busybox.
-
-For automating the setup of the environment, run the `setup` script:
+### 1. Setup Development Environment
 
 ```bash
-./scripts/setup
+./scripts/setup -y
 ```
 
-Refer to the script for more info.
+This will:
+- Clone the Rust-for-Linux kernel repository
+- Install required dependencies
+- Build the kernel with Rust support
+- Setup Busybox for initramfs
 
-## Building
+**Warning**: Kernel compilation takes 30-60+ minutes depending on your hardware.
 
-I wrote a simple wrapper script for the `make` command for compiling this LKM.
-It is located in the `scripts` directory. You can use it like this:
+### 2. Build the Module
 
 ```bash
-./scripts/build
-./scripts/build -t clean
-./scripts/build -t rust-analyzer
-./scripts/build -k /path/to/rust/enabled/kernel -b /path/to/busybox
-# ... and so on
+./scripts/build -k /path/to/linux
 ```
 
-Please refer to the
-[kernel docs](https://www.kernel.org/doc/html/latest/kbuild/kbuild.html) for
-more info on basic Kbuild usage.
-
-There's also rust specific targets. For example, you can build the rust-analyzer
-project configuration with:
+### 3. Run in QEMU
 
 ```bash
-./scripts/build -t rust-analyzer
+./scripts/run -k /path/to/linux -b /path/to/busybox
 ```
 
-Note that we have a bug in the current mainline kernel that prevents
-rust-analyzer from working properly with LKMs. You can find a patch for it
-[here](https://lore.kernel.org/rust-for-linux/20230121052507.885734-1-varmavinaym@gmail.com/).
+Exit QEMU: `Ctrl+A` then `X`
 
-## Running
-
-First, build the LKM. Then, you can use the `run` script to run it in a qemu VM:
+### 4. Hot Reload (Optional)
 
 ```bash
-# Default locations: KERNEL=../linux, BUSYBOX=../busybox
-./scripts/run
-# Custom locations
-./scripts/run -k /path/to/rust/enabled/kernel -b /path/to/busybox
+cargo install cargo-watch
+./scripts/hot-reload -k /path/to/linux -b /path/to/busybox
 ```
 
-This script will simply copy all the `.ko` files to the initramfs and run the
-VM.
+## Project Structure
 
-## Hot-reloading
+```
+.
+├── Cargo.toml          # Rust package metadata
+├── Kbuild              # Kernel build configuration
+├── Makefile            # Top-level make targets
+├── lkm.rs              # Main module entry point
+├── module.rs           # Module utilities
+├── scripts/
+│   ├── build           # Build the LKM
+│   ├── run             # Run in QEMU VM
+│   ├── hot-reload      # Auto-rebuild on changes
+│   └── setup           # Setup dev environment
+└── assets/
+    └── rust_analyzer_external_modules.patch
+```
 
-You can use the `hot-reload` script to hot-reload the LKM in the running VM:
+## Development Notes
+
+### Rust Version
+
+The kernel requires a specific Rust version. The setup script handles this automatically via `rustup override set`.
+
+### Kernel Configuration
+
+The kernel must have these options enabled:
+- `CONFIG_RUST=y`
+- `CONFIG_RUST_IS_AVAILABLE=y`
+- `CONFIG_MODULES=y`
+
+### Building Out-of-Tree Modules
+
+Out-of-tree Rust modules need:
+1. A kernel built with `CONFIG_RUST=y`
+2. The kernel's `rust/` directory available
+3. Proper bindings generated via `bindgen`
+
+## Troubleshooting
+
+### "Rust support is not available"
 
 ```bash
-./scripts/hot-reload
+cd /path/to/linux
+make LLVM=1 rustavailable
 ```
 
-It uses the `cargo-watch` crate to watch for changes in the source code and then
-running `./scripts/build` to build the LKM and `./scripts/run` to run it in the
-VM. Please refer to the script for more info.
+### Module won't load
+
+Check `dmesg` for errors:
+```bash
+dmesg | tail -50
+```
+
+Common issues:
+- Kernel built without `CONFIG_RUST=y`
+- Rust toolchain version mismatch
+- Missing kernel symbols
 
 ## References
 
-- [Linux Kernel Module Programming Guide](https://www.tldp.org/LDP/lkmpg/2.6/html/index.html)
-- [Rust for Linux project](https://github.com/Rust-for-Linux)
-- [Literally me](https://tomcat0x42.me/linux/rust/2023/04/01/linux-kernel-rust-dev-environment.html)
+- [Rust-for-Linux](https://github.com/Rust-for-Linux)
+- [Linux Kernel Rust Documentation](https://docs.kernel.org/rust/)
+- [Wu Yu Wei's Blog Post](https://blog.wuYuWei.com/posts/2022/05/04/rust-kernel-module-getting-started/)

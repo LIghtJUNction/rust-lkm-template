@@ -1,153 +1,227 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0
+
+## Setup script for Rust LKM development environment
+## Based on Rust-for-Linux project workflow
+
+set -euo pipefail
+IFS=$'\n\t'
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly PROJECT_ROOT="${SCRIPT_DIR}/.."
 
 usage() {
-	echo "Usage: $0 [-k /path/to/linux] [-b /path/to/busybox]"
+    cat <<EOF
+Usage: ${0##*/} [OPTIONS]
+
+Options:
+    -k, --kernel-dir <path>    Kernel directory (default: ../linux)
+    -b, --busybox-dir <path>   Busybox directory (default: ../busybox)
+    -r, --kernel-repo <url>    Kernel git repo (default: Rust-for-Linux/linux)
+    -y, --yes                  Skip confirmation prompts
+    -h, --help                 Show this help
+
+Examples:
+    ${0##*/}                           # Interactive setup
+    ${0##*/} -y                        # Non-interactive (use defaults)
+    ${0##*/} -k ~/rust-linux -b ~/busybox
+
+EOF
+    exit 1
 }
 
-# Are the command installed?
-instaled() {
-	command -v "$1" >/dev/null 2>&1
+log_info()  { printf "[INFO] %s\n" "$*"; }
+log_warn()  { printf "[WARN] %s\n" "$*" >&2; }
+log_error() { printf "[ERROR] %s\n" "$*" >&2; }
+die()       { log_error "$*"; exit 1; }
+
+check_deps() {
+    local missing=()
+    local deps=(git make qemu-system-x86_64 cpio gzip flex bison llvm lld clang libelf)
+
+    for cmd in "${deps[@]}"; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+
+    if ((${#missing[@]} > 0)); then
+        log_error "Missing dependencies: ${missing[*]}"
+        log_info "Install with: sudo pacman -S --needed ${missing[*]}"
+        return 1
+    fi
 }
 
-# Are the git repo cloned?
-cloned() {
-	[ -d "$1" ]
-}
+install_rust() {
+    log_info "Setting up Rust toolchain for kernel"
 
-# clone a git repo
-clone() {
-	git clone "$1" "$2"
-}
+    if command -v rustup &>/dev/null; then
+        rustup update stable 2>/dev/null || true
+    else
+        log_warn "rustup not found, skipping Rust setup"
+        return 0
+    fi
 
-setup_rust_in_kernel() {
-	rustup override set "$(scripts/min-tool-version.sh rustc)"
-	rustup component add rust-src rustfmt clippy
-	cargo install --locked --version "$(scripts/min-tool-version.sh bindgen)" bindgen
+    cd "${KERNEL}" || die "Cannot cd to kernel directory"
+
+    # Get the required Rust version from kernel scripts
+    local rust_version
+    rust_version=$(grep -oP 'Rustc min version: \K[0-9.]+' Documentation/rust/quick-start.rst 2>/dev/null || \
+                   grep -oP 'rustc.*\K[0-9.]+' scripts/min-tool-version.sh 2>/dev/null || \
+                   echo "")
+
+    if [[ -n "$rust_version" ]]; then
+        log_info "Kernel requires Rust: $rust_version"
+        rustup override set "$rust_version" 2>/dev/null || true
+    fi
+
+    rustup component add rust-src rustfmt clippy 2>/dev/null || true
+
+    # Install bindgen CLI (required for kernel bindings)
+    if ! command -v bindgen &>/dev/null; then
+        log_info "Installing bindgen-cli..."
+        cargo install --locked bindgen-cli 2>/dev/null || \
+            log_warn "Failed to install bindgen-cli, continuing anyway"
+    fi
 }
 
 setup_kernel() {
-	# setup the kernel
-	cd "$KERNEL" || exit
-	# patch the kernel to use the rust-analyzer for out of tree modules
-	git apply "$CURRENT_DIR"/assets/rust_analyzer_external_modules.patch
-	setup_rust_in_kernel || exit
-	make LLVM=1 CLIPPY=1 rustavailable || exit
-	make LLVM=1 CLIPPY=1 defconfig qemu-busybox-min.config rust.config || exit
-	yes "" | make LLVM=1 CLIPPY=1 -j"$(nproc)" || exit
+    log_info "Setting up Rust-enabled Linux kernel"
+
+    cd "${KERNEL}" || die "Cannot cd to kernel directory: ${KERNEL}"
+
+    # Verify this is a Rust-for-Linux kernel
+    if [[ ! -d "rust" ]]; then
+        die "Not a Rust-for-Linux kernel tree. Missing 'rust/' directory."
+    fi
+
+    # Apply rust-analyzer patch for out-of-tree modules
+    if [[ -f "${PROJECT_ROOT}/assets/rust_analyzer_external_modules.patch" ]]; then
+        if git apply --check "${PROJECT_ROOT}/assets/rust_analyzer_external_modules.patch" 2>/dev/null; then
+            git apply "${PROJECT_ROOT}/assets/rust_analyzer_external_modules.patch"
+            log_info "Applied rust-analyzer patch"
+        fi
+    fi
+
+    install_rust
+
+    # Check Rust availability
+    log_info "Checking Rust support..."
+    make LLVM=1 rustavailable
+
+    # Use defconfig + rust config
+    log_info "Configuring kernel..."
+    make LLVM=1 defconfig
+    make LLVM=1 rust.config 2>/dev/null || true
+
+    # Enable necessary options if not already set
+    make LLVM=1 menuconfig 2>/dev/null || {
+        log_warn "menuconfig failed, using defconfig + rust.config"
+    }
+
+    log_info "Building kernel (this may take a while)..."
+    make LLVM=1 -j"$(nproc)"
 }
 
 setup_busybox() {
-	# setup busybox
-	cd "$BUSYBOX" || exit
-	yes "" | make defconfig
-	sed -i 's/.*CONFIG_STATIC.*/CONFIG_STATIC=y/' .config
-	sed -i 's/.*CONFIG_STATIC_LIBGCC.*/CONFIG_STATIC_LIBGCC=y/' .config
-	yes "" | make oldconfig
-	yes "" | make -j"$(nproc)"
-	make install
+    log_info "Setting up Busybox"
+
+    cd "${BUSYBOX}" || die "Cannot cd to busybox directory: ${BUSYBOX}"
+
+    # Clone if empty
+    if [[ ! -f ".config" ]]; then
+        make defconfig
+    fi
+
+    # Enable static linking
+    sed -i 's/.*CONFIG_STATIC.*/CONFIG_STATIC=y/' .config
+    sed -i 's/.*CONFIG_STATIC_LIBGCC.*/CONFIG_STATIC_LIBGCC=y/' .config
+
+    make oldconfig 2>/dev/null || true
+    make -j"$(nproc)"
+    make install
 }
 
 config_rootfs() {
-	cd "$BUSYBOX"/_install || exit
-	mkdir -p usr/share/udhcpc/ etc/init.d/
-	cat <<EOF >etc/init.d/rcS
-mkdir -p /proc
+    log_info "Configuring initramfs rootfs"
+
+    local install_dir="${BUSYBOX}/_install"
+
+    cd "$install_dir" || die "Cannot cd to busybox install: ${install_dir}"
+
+    # Create minimal init script
+    mkdir -p usr/share/udhcpc etc/init.d/
+
+    cat > etc/init.d/rcS <<'RCSEOF'
+#!/bin/sh
+mkdir -p /proc /sys /dev /run
 mount -t proc none /proc
-ifconfig lo up
-ifconfig eth0 up
-udhcpc -i eth0
+mount -t sysfs none /sys
 mount -t devtmpfs none /dev
-mkdir -p /dev/pts
-mount -t devpts nodev  /dev/pts
+ifconfig lo up
 telnetd -l /bin/sh
-clear
-EOF
-	chmod a+x etc/init.d/rcS bin/*
+echo "Rust LKM Development Environment" > /etc/motd
+RCSEOF
+    chmod +x etc/init.d/rcS
 
-	cat <<EOF >etc/inittab
+    cat > etc/inittab <<'INITTABEOF'
 ::sysinit:/etc/init.d/rcS
-::once:-/bin/sh
+::respawn:/sbin/getty -L ttyS0 115200 vt100
 ::ctrlaltdel:/sbin/reboot
-::ctrlaltbreak:/sbin/poweroff
-#::shutdown:/bin/umount -a -r
-#::shutdown:/sbin/swapoff -a
-EOF
-	# cp ../examples/inittab etc/
+::shutdown:/bin/umount -a -r
+INITTABEOF
 
-	cp ../examples/udhcp/simple.script usr/share/udhcpc/default.script
+    # Copy shared libraries if needed
+    :
 }
 
-KERNEL=../linux
-BUSYBOX=../busybox
-KERNEL_REPO=git@github.com:Rust-for-Linux/linux.git
-BUSYBOX_REPO=git@github.com:mirror/busybox.git
-CURRENT_DIR=$PWD
+main() {
+    local kernel_dir="${PROJECT_ROOT}/../linux"
+    local busybox_dir="${PROJECT_ROOT}/../busybox"
+    local kernel_repo="https://github.com/Rust-for-Linux/linux.git"
+    local non_interactive=false
 
-# ./scripts/setup -k /path/to/linux -b /path/to/busybox --busybox-repo repo --kernel-repo repo
-while [ "$1" != "" ]; do
-	case $1 in
-	-k | --kernel)
-		shift
-		KERNEL=$1
-		;;
-	-b | --busybox)
-		shift
-		BUSYBOX=$1
-		;;
-	--kernel-repo)
-		shift
-		KERNEL_REPO=$1
-		;;
-	--busybox-repo)
-		shift
-		BUSYBOX_REPO=$1
-		;;
-	-h | --help)
-		usage
-		exit
-		;;
-	*)
-		usage
-		exit 1
-		;;
-	esac
-	shift
-done
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -k|--kernel-dir)  kernel_dir="$2"; shift 2 ;;
+            -b|--busybox-dir)  busybox_dir="$2"; shift 2 ;;
+            -r|--kernel-repo)  kernel_repo="$2"; shift 2 ;;
+            -y|--yes)          non_interactive=true; shift ;;
+            -h|--help)         usage ;;
+            *)                 usage ;;
+        esac
+    done
 
-# this script is a helper to setup a rust linux kernel development environment
-# Please refer to the README.md for more information
+    readonly KERNEL="$kernel_dir"
+    readonly BUSYBOX="$busybox_dir"
+    readonly KERNEL_REPO="$kernel_repo"
 
-# install all the depts
-echo "Installing all the depts"
-sudo pacman -S --needed --noconfirm gdb qemu flex bison llvm llvm-libs clang libelf lld rustup rust-analyzer cpio gzip git make
+    log_info "Rust LKM Development Environment Setup"
+    log_info "  Kernel:   ${KERNEL}"
+    log_info "  Busybox:  ${BUSYBOX}"
 
-# install rustup
-echo "Installing rustup"
-if ! instaled rustup; then
-	curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-fi
+    if ! "$non_interactive"; then
+        read -r "REPLY?Continue? [y/N] "
+        [[ "${REPLY,,}" != "y" ]] && exit 0
+    fi
 
-# if the kernel is not cloned, clone it
-echo "Checking if the kernel is cloned"
-if ! cloned "$KERNEL"; then
-	echo "Cloning the kernel"
-	clone "$KERNEL_REPO" "$KERNEL"
-fi
+    check_deps || exit 1
 
-# if the busybox is not cloned, clone it
-echo "Checking if busybox is cloned"
-if ! cloned "$BUSYBOX"; then
-	echo "Cloning busybox"
-	clone "$BUSYBOX_REPO" "$BUSYBOX"
-fi
+    # Clone repos if needed
+    if [[ ! -d "${KERNEL}" ]]; then
+        log_info "Cloning Rust-for-Linux kernel..."
+        git clone --depth=1 "$KERNEL_REPO" "$KERNEL"
+    fi
 
-echo "Setting up the kernel"
-setup_kernel
+    if [[ ! -d "${BUSYBOX}" ]]; then
+        log_info "Cloning Busybox..."
+        git clone --depth=1 https://github.com/mirror/busybox.git "$BUSYBOX"
+    fi
 
-echo "Setting up busybox"
-setup_busybox
+    setup_kernel
+    setup_busybox
+    config_rootfs
 
-echo "Setting up the rootfs"
-config_rootfs
+    log_info "Setup complete!"
+    log_info "Run with: ./scripts/run -k ${KERNEL} -b ${BUSYBOX}"
+}
 
-echo "Done! You can now run the kernel with: ./scripts/run"
+main "$@"
